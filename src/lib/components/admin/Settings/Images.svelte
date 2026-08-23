@@ -173,6 +173,67 @@
 		return false;
 	};
 
+	// Best-effort auto-mapping of an API-format ComfyUI workflow onto the
+	// required node slots so users don't have to look up node ids by hand.
+	const autoMapWorkflowNodes = (workflowJson, requiredNodes) => {
+		let workflow;
+		try {
+			workflow = JSON.parse(workflowJson);
+		} catch {
+			return requiredNodes;
+		}
+
+		if (!workflow || typeof workflow !== 'object') {
+			return requiredNodes;
+		}
+
+		const entries = Object.entries(workflow);
+		const findByClassType = (...patterns) =>
+			entries.filter(([, node]) =>
+				patterns.some((pattern) =>
+					String(node?.class_type ?? '').toLowerCase().includes(pattern)
+				)
+			);
+
+		const textEncoders = findByClassType('cliptextencode', 'textencode');
+		const samplers = findByClassType('ksampler');
+		const latentImages = findByClassType('latentimage');
+		const imageLoaders = findByClassType('loadimage');
+		const modelLoaders = findByClassType(
+			'unetloader',
+			'checkpointloadersimple',
+			'kcloraloader',
+			'loraloader'
+		);
+
+		const firstInputId = (nodes, key) => {
+			for (const [id, node] of nodes) {
+				if (node?.inputs && key in node.inputs) {
+					return id;
+				}
+			}
+			return null;
+		};
+
+		const mappings = {
+			prompt: firstInputId(textEncoders, 'text') ?? firstInputId(textEncoders, 'prompt'),
+			image: firstInputId(imageLoaders, 'image'),
+			model: firstInputId(modelLoaders, 'unet_name') ?? firstInputId(modelLoaders, 'ckpt_name'),
+			width: firstInputId(latentImages, 'width'),
+			height: firstInputId(latentImages, 'height'),
+			steps: firstInputId(samplers, 'steps'),
+			seed:
+				firstInputId(samplers, 'seed') ??
+				firstInputId(samplers, 'noise_seed') ??
+				firstInputId(findByClassType('randomnoise'), 'noise_seed')
+		};
+
+		return requiredNodes.map((node) => {
+			const mapped = mappings[node.type];
+			return mapped ? { ...node, node_ids: mapped } : node;
+		});
+	};
+
 	const saveHandler = async () => {
 		loading = true;
 
@@ -188,7 +249,11 @@
 					type: node.type,
 					key: node.key,
 					node_ids:
-						node.node_ids.trim() === '' ? [] : node.node_ids.split(',').map((id) => id.trim())
+						typeof node.node_ids === 'string' && node.node_ids.trim() !== ''
+							? node.node_ids.split(',').map((id) => id.trim())
+							: Array.isArray(node.node_ids)
+								? node.node_ids
+								: []
 				};
 			});
 		}
@@ -205,7 +270,11 @@
 					type: node.type,
 					key: node.key,
 					node_ids:
-						node.node_ids.trim() === '' ? [] : node.node_ids.split(',').map((id) => id.trim())
+						typeof node.node_ids === 'string' && node.node_ids.trim() !== ''
+							? node.node_ids.split(',').map((id) => id.trim())
+							: Array.isArray(node.node_ids)
+								? node.node_ids
+								: []
 				};
 			});
 		}
@@ -246,13 +315,15 @@
 			}
 
 			REQUIRED_WORKFLOW_NODES = REQUIRED_WORKFLOW_NODES.map((node) => {
-				const n = config.COMFYUI_WORKFLOW_NODES.find((n) => n.type === node.type) ?? node;
-				console.debug(n);
+				const nodes = Array.isArray(config.COMFYUI_WORKFLOW_NODES)
+					? config.COMFYUI_WORKFLOW_NODES
+					: [];
+				const n = nodes.find((n) => n.type === node.type) ?? node;
 
 				return {
 					type: n.type,
 					key: n.key,
-					node_ids: typeof n.node_ids === 'string' ? n.node_ids : n.node_ids.join(',')
+					node_ids: typeof n.node_ids === 'string' ? n.node_ids : (n.node_ids ?? []).join(',')
 				};
 			});
 
@@ -279,14 +350,15 @@
 					: config.AUTOMATIC1111_PARAMS;
 
 			REQUIRED_EDIT_WORKFLOW_NODES = REQUIRED_EDIT_WORKFLOW_NODES.map((node) => {
-				const n =
-					config.IMAGES_EDIT_COMFYUI_WORKFLOW_NODES.find((n) => n.type === node.type) ?? node;
-				console.debug(n);
+				const nodes = Array.isArray(config.IMAGES_EDIT_COMFYUI_WORKFLOW_NODES)
+					? config.IMAGES_EDIT_COMFYUI_WORKFLOW_NODES
+					: [];
+				const n = nodes.find((n) => n.type === node.type) ?? node;
 
 				return {
 					type: n.type,
 					key: n.key,
-					node_ids: typeof n.node_ids === 'string' ? n.node_ids : n.node_ids.join(',')
+					node_ids: typeof n.node_ids === 'string' ? n.node_ids : (n.node_ids ?? []).join(',')
 				};
 			});
 		}
@@ -556,6 +628,10 @@
 
 									reader.onload = (e) => {
 										config.COMFYUI_WORKFLOW = e.target.result;
+										REQUIRED_WORKFLOW_NODES = autoMapWorkflowNodes(
+											e.target.result,
+											REQUIRED_WORKFLOW_NODES
+										);
 										e.target.value = null;
 									};
 
@@ -854,6 +930,10 @@
 
 									reader.onload = (e) => {
 										config.IMAGES_EDIT_COMFYUI_WORKFLOW = e.target.result;
+										REQUIRED_EDIT_WORKFLOW_NODES = autoMapWorkflowNodes(
+											e.target.result,
+											REQUIRED_EDIT_WORKFLOW_NODES
+										);
 										e.target.value = null;
 									};
 
